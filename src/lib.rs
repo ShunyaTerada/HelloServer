@@ -2,15 +2,19 @@ use std::{sync::{Arc, Mutex, mpsc}, thread};
 
 pub struct ThreadPool{
     workers: Vec<Worker>,
-    sender: mpsc::Sender<Job>,
+    sender: mpsc::Sender<Message>,
 }
 
 struct Worker {
     id: usize,
-    thread: thread::JoinHandle<()>,
+    thread: Option<thread::JoinHandle<()>>,
 }
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
+enum Message {
+    NewJob(Job),
+    Terminate,
+}
 
 impl ThreadPool{
     /// 新しいThreadPoolを生成する。
@@ -45,25 +49,49 @@ impl ThreadPool{
     {
         let job = Box::new(f);
         
-        self.sender.send(job).unwrap();
+        self.sender.send(Message::NewJob(job)).unwrap();
     }
 }   
 
+impl Drop for ThreadPool {
+    fn drop (& mut self) {
+        println!("Sendnig terminate message to all workers.");
+        
+        for _ in &mut self.workers {
+            self.sender.send(Message::Terminate).unwrap();
+        }
+        println!("全ワーカーを閉じます。");
+        for worker in &mut self.workers {
+            println!("Worker(id:{})を終了します。", worker.id);
+            if let Some(thread) = worker.thread.take() {
+               thread.join().unwrap();
+            }
+        }
+    }
+}
 
 impl Worker {
-    fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> Worker {
+    fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Message>>>) -> Worker {
         let thread = thread::spawn(move || {
             loop {
-                let job = receiver.lock().unwrap().recv().unwrap();
+                let message = receiver.lock().unwrap().recv().unwrap();
                 
-                println!("Woker(id:{})は仕事を得ました。実行します。", id);
-                job();
+                match message {
+                    Message::NewJob(job) => {
+                        println!("Woker(id:{})は仕事を得ました。実行します。", id);
+                        job();
+                    }
+                    Message::Terminate => {
+                        println!("Woker(id:{})は停止するように指示されました。", id);
+                        break;
+                    }
+                }
             }
         });
 
         Worker {
             id,
-            thread,
+            thread: Some(thread),
         }
     }
 }
